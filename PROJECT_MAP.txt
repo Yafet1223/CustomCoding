@@ -1,0 +1,634 @@
+CUSTOM CODING APP - PROJECT MAP
+
+This app has three main parts:
+
+1. Frontend
+2. Backend
+3. Agent
+
+They work together like this:
+
+User -> React Frontend -> FastAPI Backend -> LangGraph Agent -> Tools / Ollama
+                                              |
+Frontend <- JSON Response <- FastAPI Backend <- Agent Result
+
+
+============================================================
+1. FRONTEND
+============================================================
+
+Location:
+
+Frontend/my-react-app
+
+Main files:
+
+Frontend/my-react-app/src/App.jsx
+Frontend/my-react-app/src/App.css
+Frontend/my-react-app/src/index.css
+Frontend/my-react-app/vite.config.js
+
+
+What the Frontend does:
+
+The frontend is the visual chat app that the user interacts with.
+
+It is built with React and looks like an AI chat interface. It lets the user:
+
+- Type a message
+- Send that message to the backend
+- See assistant replies
+- See loading/thinking state
+- Start a new chat
+- Click starter prompts
+- Approve or reject actions when the agent pauses
+
+
+Important Frontend state:
+
+messages
+
+Stores all visible chat messages.
+
+Example:
+
+[
+  { role: "user", content: "Create a Python file" },
+  { role: "assistant", content: "I need approval before writing." }
+]
+
+
+input
+
+Stores what the user is currently typing in the message box.
+
+
+threadId
+
+Stores the conversation ID returned by the backend.
+
+This matters because the backend agent needs to know which conversation it is continuing.
+
+
+pending
+
+Stores a paused approval request from the backend.
+
+Example:
+
+{
+  action: "write_file",
+  details: {
+    path: "hello.py",
+    preview: "print('hello')"
+  }
+}
+
+If pending exists, the user cannot send a normal message until they approve or reject the action.
+
+
+isBusy
+
+Tracks whether the frontend is waiting for the backend.
+
+Used to disable buttons and show the loading animation.
+
+
+error
+
+Stores backend or network errors so they can be shown in the UI.
+
+
+Important Frontend functions:
+
+sendMessage()
+
+Sends a normal chat message to:
+
+POST /api/chat
+
+It sends:
+
+{
+  "message": "user message here",
+  "thread_id": "existing thread id if there is one"
+}
+
+
+handleDecision()
+
+Sends an approval or rejection to:
+
+POST /api/resume
+
+It sends:
+
+{
+  "thread_id": "conversation id",
+  "decision": "approve"
+}
+
+or:
+
+{
+  "thread_id": "conversation id",
+  "decision": "reject"
+}
+
+
+resetChat()
+
+Clears the current frontend conversation and starts fresh.
+
+
+Message component
+
+Renders one chat message bubble.
+
+If the message role is assistant, it shows AI.
+If the message role is user, it shows You.
+
+
+ApprovalCard component
+
+Renders the approve/reject UI when the backend says the agent is paused.
+
+
+vite.config.js
+
+This file helps connect frontend and backend during development.
+
+It proxies frontend API calls:
+
+/api -> http://localhost:5001
+
+So the React app can call /api/chat without needing to hardcode the backend URL.
+
+It also builds the frontend into:
+
+Backend/static
+
+That lets FastAPI serve the finished React app.
+
+
+============================================================
+2. BACKEND
+============================================================
+
+Location:
+
+Backend/App.py
+
+
+What the Backend does:
+
+The backend is the bridge between the React UI and the coding agent.
+
+It is built with FastAPI.
+
+It receives messages from the frontend, sends them into the LangGraph agent, then returns a JSON response back to the frontend.
+
+
+Main API routes:
+
+GET /api/health
+
+Simple health check.
+
+Returns:
+
+{
+  "status": "ok"
+}
+
+
+POST /api/chat
+
+Used when the user sends a new message.
+
+Input:
+
+{
+  "message": "Create a file",
+  "thread_id": "optional existing conversation id"
+}
+
+What it does:
+
+- Checks that the message is not empty
+- Creates a new thread_id if one was not provided
+- Sends the message to the agent graph
+- Checks whether the agent finished or paused
+- Returns the result to the frontend
+
+
+POST /api/resume
+
+Used when the agent is paused and waiting for approval.
+
+Input:
+
+{
+  "thread_id": "conversation id",
+  "decision": "approve"
+}
+
+or:
+
+{
+  "thread_id": "conversation id",
+  "decision": "reject"
+}
+
+What it does:
+
+- Finds the paused agent state for that thread_id
+- Resumes the agent with approve or reject
+- Checks whether the agent finished or paused again
+- Returns the result to the frontend
+
+
+Response shape:
+
+The backend returns a ChatResponse.
+
+Example when done:
+
+{
+  "status": "done",
+  "response": "I created the file.",
+  "trace": [],
+  "pending": null,
+  "thread_id": "abc-123"
+}
+
+Example when paused:
+
+{
+  "status": "paused",
+  "response": null,
+  "trace": [],
+  "pending": {
+    "action": "write_file",
+    "details": {
+      "path": "hello.py",
+      "preview": "print('hello')"
+    }
+  },
+  "thread_id": "abc-123"
+}
+
+
+Important Backend functions:
+
+chat()
+
+Handles POST /api/chat.
+
+
+resume()
+
+Handles POST /api/resume.
+
+
+_check_paused()
+
+Checks if the LangGraph agent stopped because it is finished or because it is waiting for approval.
+
+If the agent is paused, it returns:
+
+status = "paused"
+
+If the agent is finished, it returns:
+
+status = "done"
+
+
+_build_trace()
+
+Builds a list of tool calls and tool results from the agent messages.
+
+This is useful for debugging, but the UI does not need to show it if you want a cleaner ChatGPT-style interface.
+
+
+Static frontend serving:
+
+At the bottom of Backend/App.py, FastAPI serves files from:
+
+Backend/static
+
+That means after building the React app, the backend can serve the full website.
+
+
+============================================================
+3. AGENT
+============================================================
+
+Location:
+
+agent/custom.py
+
+
+What the Agent does:
+
+The agent is the brain of the coding app.
+
+It uses:
+
+- LangGraph for the agent workflow
+- Ollama for the local AI model
+- Tools for reading files, editing files, running commands, and git actions
+- Human approval before risky actions
+
+
+Main model:
+
+llm = ChatOllama(model="llama3", temperature=0)
+
+This means the agent uses a local Ollama model called llama3.
+
+If Ollama is slow, the whole agent will feel slow.
+
+
+Sandbox:
+
+SANDBOX_ROOT = agent/sandbox
+
+The agent tools are restricted to this folder.
+
+This is important because it prevents the agent from reading or writing random files on your computer.
+
+
+Read-only tools:
+
+read_file(path)
+
+Reads a file inside the sandbox.
+
+
+list_directory(path)
+
+Lists files and folders inside the sandbox.
+
+
+grep_code(pattern, path)
+
+Searches files inside the sandbox for text.
+
+
+These tools do not require user approval because they only read information.
+
+
+Write / execute tools:
+
+write_file(path, content)
+
+Creates or overwrites a file.
+
+Requires approval.
+
+
+edit_file(path, old_text, new_text)
+
+Edits one exact piece of text in a file.
+
+Requires approval.
+
+
+run_command(command)
+
+Runs a shell command inside the sandbox.
+
+Requires approval.
+
+
+git_commit(message)
+
+Stages and commits changes inside the sandbox repo.
+
+Requires approval.
+
+
+git_status()
+
+Shows git status.
+
+
+git_diff()
+
+Shows git diff.
+
+
+Approval behavior:
+
+Some tools call interrupt().
+
+When interrupt() happens:
+
+- The agent pauses
+- The backend returns status = "paused"
+- The frontend shows an approval card
+- The user clicks Approve or Reject
+- The frontend calls /api/resume
+- The backend resumes the agent
+
+
+Why this matters:
+
+The agent can think and inspect files by itself, but it cannot write files or run commands without the user approving first.
+
+That keeps the app safer.
+
+
+System prompt:
+
+The SYSTEM_PROMPT tells the agent how to behave.
+
+It explains:
+
+- The agent is a careful coding assistant
+- It should inspect before editing
+- It should prefer edit_file over write_file
+- It should ask for approval before writes or commands
+- It must use XML-style tool calls
+- What tools are available
+
+
+Tool call format:
+
+The agent is instructed to call tools like this:
+
+<tool_call name="read_file">
+  <path>hello.py</path>
+</tool_call>
+
+The function parse_xml_tool_calls() reads that XML-like text and converts it into real LangGraph tool calls.
+
+
+LangGraph flow:
+
+The graph works like this:
+
+START -> agent -> tools -> agent -> END
+
+In plain English:
+
+1. User sends a message
+2. Agent thinks
+3. Agent may call a tool
+4. Tool runs
+5. Agent sees the tool result
+6. Agent thinks again
+7. Agent gives final answer or asks for another tool
+
+
+Why the agent can be slow:
+
+The agent may need multiple model calls for one user message.
+
+Example:
+
+1. Model call to decide which tool to use
+2. Tool runs
+3. Model call to understand the tool result
+4. Possibly another tool call
+5. Final model call
+
+Also, because the model is running locally through Ollama, speed depends on your computer and the model size.
+
+
+============================================================
+4. FULL REQUEST FLOW
+============================================================
+
+Example: user asks the app to create a file.
+
+Step 1:
+
+User types:
+
+Create hello.py
+
+
+Step 2:
+
+React sends:
+
+POST /api/chat
+
+
+Step 3:
+
+FastAPI sends the message into app_graph.
+
+
+Step 4:
+
+The agent decides it needs to write a file.
+
+
+Step 5:
+
+write_file() calls interrupt().
+
+
+Step 6:
+
+FastAPI sees the graph is paused and returns:
+
+status = "paused"
+
+
+Step 7:
+
+React shows the approval card.
+
+
+Step 8:
+
+User clicks Approve.
+
+
+Step 9:
+
+React sends:
+
+POST /api/resume
+
+
+Step 10:
+
+FastAPI resumes the agent.
+
+
+Step 11:
+
+The tool writes the file.
+
+
+Step 12:
+
+The agent gives the final answer.
+
+
+Step 13:
+
+React displays the assistant message in the chat.
+
+
+============================================================
+5. MENTAL MODEL
+============================================================
+
+Think of the app like this:
+
+Frontend = Face
+
+The frontend is what the user sees and clicks.
+
+
+Backend = Bridge
+
+The backend connects the visual app to the agent.
+
+
+Agent = Brain
+
+The agent decides what to do.
+
+
+Tools = Hands
+
+Tools let the agent read files, edit files, run commands, and use git.
+
+
+Approval = Safety Lock
+
+Approval prevents the agent from doing risky actions without the user saying yes.
+
+
+============================================================
+6. COMMANDS
+============================================================
+
+Run backend:
+
+.\venv\Scripts\python.exe -m uvicorn Backend.App:app --reload --host 127.0.0.1 --port 5001
+
+
+Run frontend in development:
+
+cd Frontend/my-react-app
+npm.cmd run dev
+
+
+Build frontend into backend static folder:
+
+cd Frontend/my-react-app
+npm.cmd run build
+
+
+Open app after backend is running:
+
+http://127.0.0.1:5001
+

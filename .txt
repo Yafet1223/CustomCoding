@@ -1,0 +1,105 @@
+//Code understanding
+//Code Generation
+//Code editing
+//Code Correction
+//Fix Coding issues
+//Refreshes History
+//Auto Commit
+
+
+# Coding Agent — Project Spec
+
+## 1. Functional Requirements
+
+**What the system should do:**
+- Understand existing code — read files, search across a codebase, explain what code does
+- Generate new code — create new files from a plain-English request
+- Edit existing code — targeted, precise changes (not full-file rewrites)
+- Diagnose errors — explain tracebacks/failing tests using the actual code
+- Execute & verify — run commands/tests, read output, loop if something fails
+- Track changes — git-aware (status, diff, commit) on a local repo
+- Never act without consent — every write/execute/commit action pauses for human approval before running
+
+---
+
+## 2. AI Requirements
+
+### Model requirements
+- Must support **tool/function calling** reliably — this rules out small/older local models
+- Model-agnostic by design — works with Claude, Gemini, or Ollama (`llama3.1`+, `qwen2.5`) interchangeably; only 2 lines change (`import` + instantiation)
+- Local (Ollama) = free, private, less reliable tool-calling. Cloud (Claude/Gemini) = costs money/API key, more reliable
+
+### AI tasks
+| Task | How it's done |
+|---|---|
+| Decide which tool to use | LLM reasoning, via `bind_tools()` |
+| Generate code | LLM output, written via `write_file`/`edit_file` |
+| Explain errors | LLM reasoning over `run_command` output + relevant file contents |
+| Decide when to stop | LLM returns plain text instead of a tool call → loop ends |
+
+### Classification of tools
+| Tool | Type | Approval needed? |
+|---|---|---|
+| `read_file`, `list_directory`, `grep_code` | Read-only | No |
+| `git_status`, `git_diff` | Read-only | No |
+| `write_file`, `edit_file` | Write | **Yes — `interrupt()`** |
+| `run_command` | Execute (side effect) | **Yes — `interrupt()`** |
+| `git_commit` | Write (state-changing) | **Yes — `interrupt()`** |
+
+### How memory works
+- **Checkpointer** (`InMemorySaver`) — scoped by `thread_id`. Remembers one task/conversation's message history so the agent has context turn to turn. Also what makes `interrupt()` possible — pausing mid-tool-call requires a saved state to pause into.
+- **No long-term store in this project** (unlike the Sage project) — a coding task doesn't need to persist facts across separate sessions the way personal notes do. Could be added later (e.g. remembering coding style preferences).
+
+### Tool calling
+- Standard LangGraph ReAct loop: `agent` node (LLM + `bind_tools`) → `tools_condition` routes to `ToolNode` if the LLM requested a call → `ToolNode` executes → loops back to `agent` → repeats until the LLM replies with plain text → `END`
+- Write/execute tools call `interrupt()` inside the tool function itself, freezing execution until `Command(resume="approve"/"reject")` is sent back with the same `thread_id`
+
+---
+
+## 3. Frontend Requirements
+
+**What it is:** a **local web app** (browser-based), not a native app or CLI-only tool — same shape as the Sage project.
+
+**Tech stack:**
+- Plain HTML/CSS/JS (no framework, no build step) — single `index.html`
+- Chat-style UI, same pattern as Sage, plus an **approval modal/panel** to show pending `interrupt()` requests (diff preview, command, or commit message) with Approve/Reject buttons
+
+---
+
+## 4. Backend Requirements
+
+**Tech stack:**
+- **Python** — LangGraph + LangChain model integration (`langchain-ollama` / `langchain-google-genai` / `langchain-anthropic`)
+- **FastAPI** — HTTP layer, Pydantic request/response validation, serves the frontend statically
+- Split into two files: `agent.py` (LangGraph, zero web dependencies) + `app.py` (FastAPI routes only)
+
+**Database:**
+- **None required for v1.** State lives in `InMemorySaver` (RAM), reset on server restart
+- For persistence across restarts: swap to `SqliteSaver` (single file, no server needed) or `PostgresSaver` (if multi-user/production)
+- No separate "database" in the traditional sense — the checkpointer *is* the persistence layer
+
+---
+
+## 5. Deployment
+
+**Where:** local machine only, for now — this project is designed to touch a sandboxed folder on disk, which doesn't make sense to expose publicly without much more sandboxing hardening (see caveat on `run_command` below)
+
+**How:**
+```bash
+pip install -r requirements.txt --break-system-packages
+ollama serve && ollama pull llama3.1     # if using local model
+uvicorn app:app --reload --port 5000
+```
+Open `http://localhost:5000`
+
+**If deploying beyond local use later** (not v1 scope):
+- `run_command` needs real sandboxing (Docker container per session), not just path confinement — currently it can execute arbitrary shell commands with real system access
+- Swap `InMemorySaver`/store for `SqliteSaver`/`PostgresSaver`
+- Add auth (currently `user_id` is a free-text field, not verified identity)
+- Host on a small VM/container platform (Railway, Fly.io, a VPS) — not serverless, since it needs a persistent process for the checkpointer state
+
+---
+
+## One-paragraph mental model
+
+A **FastAPI web app** wraps a **LangGraph agent** that can read, search, edit, and run code inside a **sandboxed, git-tracked folder**. The agent decides on its own which of 9 tools to use per request, looping between "think" and "act" until done. Any write, edit, command, or commit **pauses execution** (via `interrupt()`) and waits for you to approve it in the UI before anything actually happens. No database — conversation memory lives in RAM for the current server session. Runs locally, on whichever model you point it at (Ollama/Gemini/Claude).

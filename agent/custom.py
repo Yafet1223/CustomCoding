@@ -378,7 +378,7 @@ if __name__ == "__main__":
     config = {"configurable": {"thread_id": "manual-test"}}
 
     result = app_graph.invoke(
-        {"messages": [("user", "Create a file called hello.txt with the text 'Hello, sandbox!'")]},
+        {"messages": [("user", "Create a file called yafet.txt with the text 'Hello, yafet!'")]},
         config=config,
     )
 
